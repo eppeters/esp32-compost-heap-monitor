@@ -1,0 +1,22 @@
+Traceback (most recent call last):
+  File "/home/eddie/.local/bin/ampy", line 8, in <module>
+    sys.exit(cli())
+  File "/usr/lib/python3/dist-packages/click/core.py", line 764, in __call__
+    return self.main(*args, **kwargs)
+  File "/usr/lib/python3/dist-packages/click/core.py", line 717, in main
+    rv = self.invoke(ctx)
+  File "/usr/lib/python3/dist-packages/click/core.py", line 1137, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+  File "/usr/lib/python3/dist-packages/click/core.py", line 956, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+  File "/usr/lib/python3/dist-packages/click/core.py", line 555, in invoke
+    return callback(*args, **kwargs)
+  File "/home/eddie/.local/lib/python3.8/site-packages/ampy/cli.py", line 305, in rmdir
+    board_files.rmdir(remote_folder, missing_okay=missing_okay)
+  File "/home/eddie/.local/lib/python3.8/site-packages/ampy/files.py", line 296, in rmdir
+    raise ex
+  File "/home/eddie/.local/lib/python3.8/site-packages/ampy/files.py", line 287, in rmdir
+    out = self._pyboard.exec_(textwrap.dedent(command))
+  File "/home/eddie/.local/lib/python3.8/site-packages/ampy/pyboard.py", line 279, in exec_
+    raise PyboardError('exception', ret, ret_err)
+ampy.pyboard.PyboardError: ('exception', b'', b'Traceback (most recent call last):\r\n  File "<stdin>", line 17, in <module>\r\n  File "<stdin>", line 16, in rmdir\r\nOSError: [Errno 22] EINVAL\r\n')
