@@ -40,7 +40,9 @@ Implementation Notes
 * Adafruit's Register library: https://github.com/adafruit/Adafruit_CircuitPython_Register
 """
 
+import gc
 import math
+import micropython
 import struct
 import time
 from adafruit_bus_device.i2c_device import I2CDevice
@@ -51,12 +53,109 @@ __repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_MLX90640.git"
 # We match the melexis library naming, and don't want to change
 # pylint: disable=invalid-name
 
-eeData = [0] * 832
+DEFAULT_BUFFERED_LIST_SIZE = 32
 I2C_READ_LEN = 2048
 SCALEALPHA = 0.000001
 MLX90640_DEVICEID1 = 0x2407
 OPENAIR_TA_SHIFT = 8
+EEDATA_BASE_ADDRESS = 0x2400
 
+class I2CClient:
+
+    def __init__(self, i2c_device):
+        self.i2c_device = i2c_device
+        self.addrbuf = bytearray(2)
+        self.inbuf = bytearray(2 * I2C_READ_LEN)
+        self.cmdbuf = bytearray(4)
+
+    def _I2CWriteWord(self, writeAddress, data):
+        self.cmdbuf[0] = writeAddress >> 8
+        self.cmdbuf[1] = writeAddress & 0x00FF
+        self.cmdbuf[2] = data >> 8
+        self.cmdbuf[3] = data & 0x00FF
+        dataCheck = [0]
+
+        with self.i2c_device as i2c:
+            i2c.write(self.cmdbuf)
+        # print("Wrote:", [hex(i) for i in cmd])
+        time.sleep(0.001)
+        self._I2CReadWords(writeAddress, dataCheck)
+        # print("dataCheck: 0x%x" % dataCheck[0])
+        # if (dataCheck != data):
+        #    return -2
+
+    def _I2CReadWords(self, addr, buffer, *, end=None):
+        if end is None:
+            remainingWords = len(buffer)
+        else:
+            remainingWords = end
+        offset = 0
+
+        with self.i2c_device as i2c:
+            while remainingWords:
+                self.addrbuf[0] = addr >> 8  # MSB
+                self.addrbuf[1] = addr & 0xFF  # LSB
+                read_words = min(remainingWords, I2C_READ_LEN)
+                i2c.write_then_readinto(
+                    self.addrbuf, self.inbuf, in_end=read_words * 2
+                )  # in bytes
+                # print("-> ", [hex(i) for i in addrbuf])
+                outwords = struct.unpack(
+                    ">" + "H" * read_words, self.inbuf[0 : read_words * 2]
+                )
+                # print("<- (", read_words, ")", [hex(i) for i in outwords])
+                for i, w in enumerate(outwords):
+                    buffer[offset + i] = w
+                offset += read_words
+                remainingWords -= read_words
+                addr += read_words
+        #print('at end of readwords for ', addr, len(buffer))
+        #micropython.mem_info(1)
+        # print("i2c read", read_words, "words in", time.monotonic()-stamp)
+        # print("Read: ", [hex(i) for i in buffer[0:10]])
+
+
+class BufferedI2CList:
+    """Get pieces of data from the device in sized buffered chunks instead of loading it all into memory.
+    
+    Trades processor time for memory."""
+
+    def __init__(self, i2c_client, base_address, buffer_size=DEFAULT_BUFFERED_LIST_SIZE):
+        self.i2c_client = i2c_client
+        self.BASE_ADDRESS = base_address
+        self.BUFFER_SIZE = buffer_size
+        self.buffer = [0] * self.BUFFER_SIZE
+        self.buffer_start = 0
+
+    def _is_cached_index(self, index):
+        return self.buffer_start <= index and index < (self.buffer_start + self.BUFFER_SIZE)
+
+    def _get_buffer_index(self, index):
+        return index - self.buffer_start
+
+    def __getitem__(self, index):
+        #print('getting index ', index)
+        if self._is_cached_index(index):
+            #print('cached index ', index)
+            return self.buffer[self._get_buffer_index(index)]
+        self.i2c_client._I2CReadWords(self._get_index_address(index), self.buffer)
+        #print('setting buffer start to', index)
+        self.buffer_start = index
+        return self.buffer[0]
+
+    def _get_index_address(self, index):
+        return self.BASE_ADDRESS + index
+
+class CachedCalculationList:
+    """Cache calculation in small chunks rather than saving it all.
+
+    Trades processor time for memory."""
+
+    def __init__(self, algorithm):
+        self.algorithm = algorithm
+
+    def __getitem__(self, index):
+        return self.algorithm(index)
 
 class RefreshRate:  # pylint: disable=too-few-public-methods
     """ Enum-like class for MLX90640's refresh rate """
@@ -87,7 +186,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
     calibrationModeEE = 0
     ksTo = [0] * 5
     ct = [0] * 5
-    alpha = [0] * 768
+    alphaTemp = [0.0] * 768
     alphaScale = 0
     offset = [0] * 768
     kta = [0] * 768
@@ -102,11 +201,20 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
     cpKta = 0
     cpKv = 0
 
+    def _calculate_alpha(self, i):
+        #print('calculate alpha for ', i)
+        temp = self.alphaTemp[i] * math.pow(2, self.alphaScale)
+        #micropython.mem_info(1)
+        return int(temp + 0.5)
+
     def __init__(self, i2c_bus, address=0x33):
-        self.i2c_device = I2CDevice(i2c_bus, address)
-        self._I2CReadWords(0x2400, eeData)
+        i2c_device = I2CDevice(i2c_bus, address)
+        self.i2c_client = I2CClient(i2c_device)
+        self.eeData = BufferedI2CList(self.i2c_client, EEDATA_BASE_ADDRESS)
         # print(eeData)
         self._ExtractParameters()
+
+        self.alpha = CachedCalculationList(lambda i: self._calculate_alpha(i))
 
     @property
     def serial_number(self):
@@ -191,6 +299,8 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
         ta = ptatArt / (1 + self.KvPTAT * (vdd - 3.3)) - self.vPTAT25
         ta = ta / self.KtPTAT + 25
+        del ptatArt
+        gc.collect()
         return ta
 
     def _GetVdd(self, frameData):
@@ -203,7 +313,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
             2, resolutionRAM
         )
         vdd = (resolutionCorrection * vdd - self.vdd25) / self.kVdd + 3.3
-
+        gc.collect()
         return vdd
 
     def _CalculateTo(self, frameData, emissivity, tr, result):
@@ -294,6 +404,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                     * (1 + kta * (ta - 25))
                     * (1 + kv * (vdd - 3.3))
                 )
+                del kta, kv
 
                 if mode != self.calibrationModeEE:
                     irData += (
@@ -303,7 +414,6 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
                 irData = irData - self.tgc * irDataCP[subPage]
                 irData /= emissivity
-
                 alphaCompensated = SCALEALPHA * alphaScale / self.alpha[pixelNumber]
                 alphaCompensated *= 1 + self.KsTa * (ta - 25)
 
@@ -325,6 +435,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                     )
                     - 273.15
                 )
+                del Sx
 
                 if To < self.ct[1]:
                     torange = 0
@@ -349,8 +460,10 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                     )
                     - 273.15
                 )
-
+                del alphaCompensated
                 result[pixelNumber] = To
+                del To
+                gc.collect()
 
     # pylint: enable=too-many-locals, too-many-branches, too-many-statements
 
@@ -391,36 +504,36 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
     def _ExtractVDDParameters(self):
         # extract VDD
-        self.kVdd = (eeData[51] & 0xFF00) >> 8
+        self.kVdd = (self.eeData[51] & 0xFF00) >> 8
         if self.kVdd > 127:
             self.kVdd -= 256  # convert to signed
         self.kVdd *= 32
-        self.vdd25 = eeData[51] & 0x00FF
+        self.vdd25 = self.eeData[51] & 0x00FF
         self.vdd25 = ((self.vdd25 - 256) << 5) - 8192
 
     def _ExtractPTATParameters(self):
         # extract PTAT
-        self.KvPTAT = (eeData[50] & 0xFC00) >> 10
+        self.KvPTAT = (self.eeData[50] & 0xFC00) >> 10
         if self.KvPTAT > 31:
             self.KvPTAT -= 64
         self.KvPTAT /= 4096
-        self.KtPTAT = eeData[50] & 0x03FF
+        self.KtPTAT = self.eeData[50] & 0x03FF
         if self.KtPTAT > 511:
             self.KtPTAT -= 1024
         self.KtPTAT /= 8
-        self.vPTAT25 = eeData[49]
-        self.alphaPTAT = (eeData[16] & 0xF000) / math.pow(2, 14) + 8
+        self.vPTAT25 = self.eeData[49]
+        self.alphaPTAT = (self.eeData[16] & 0xF000) / math.pow(2, 14) + 8
 
     def _ExtractGainParameters(self):
         # extract Gain
-        self.gainEE = eeData[48]
+        self.gainEE = self.eeData[48]
         if self.gainEE > 32767:
             self.gainEE -= 65536
 
     def _ExtractTgcParameters(self):
         # extract Tgc
         #print(eeData[60])
-        self.tgc = eeData[60] & 0x00FF
+        self.tgc = self.eeData[60] & 0x00FF
         #print(self.tgc)
         if self.tgc > 127:
             self.tgc -= 256
@@ -429,32 +542,32 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
     def _ExtractResolutionParameters(self):
         # extract resolution
-        self.resolutionEE = (eeData[56] & 0x3000) >> 12
+        self.resolutionEE = (self.eeData[56] & 0x3000) >> 12
 
     def _ExtractKsTaParameters(self):
         # extract KsTa
-        self.KsTa = (eeData[60] & 0xFF00) >> 8
+        self.KsTa = (self.eeData[60] & 0xFF00) >> 8
         if self.KsTa > 127:
             self.KsTa -= 256
         self.KsTa /= 8192
 
     def _ExtractKsToParameters(self):
         # extract ksTo
-        step = ((eeData[63] & 0x3000) >> 12) * 10
+        step = ((self.eeData[63] & 0x3000) >> 12) * 10
         self.ct[0] = -40
         self.ct[1] = 0
-        self.ct[2] = (eeData[63] & 0x00F0) >> 4
-        self.ct[3] = (eeData[63] & 0x0F00) >> 8
+        self.ct[2] = (self.eeData[63] & 0x00F0) >> 4
+        self.ct[3] = (self.eeData[63] & 0x0F00) >> 8
         self.ct[2] *= step
         self.ct[3] = self.ct[2] + self.ct[3] * step
 
-        KsToScale = (eeData[63] & 0x000F) + 8
+        KsToScale = (self.eeData[63] & 0x000F) + 8
         KsToScale = 1 << KsToScale
 
-        self.ksTo[0] = eeData[61] & 0x00FF
-        self.ksTo[1] = (eeData[61] & 0xFF00) >> 8
-        self.ksTo[2] = eeData[62] & 0x00FF
-        self.ksTo[3] = (eeData[62] & 0xFF00) >> 8
+        self.ksTo[0] = self.eeData[61] & 0x00FF
+        self.ksTo[1] = (self.eeData[61] & 0xFF00) >> 8
+        self.ksTo[2] = self.eeData[62] & 0x00FF
+        self.ksTo[3] = (self.eeData[62] & 0xFF00) >> 8
 
         for i in range(4):
             if self.ksTo[i] > 127:
@@ -467,37 +580,37 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         offsetSP = [0] * 2
         alphaSP = [0] * 2
 
-        alphaScale = ((eeData[32] & 0xF000) >> 12) + 27
+        alphaScale = ((self.eeData[32] & 0xF000) >> 12) + 27
 
-        offsetSP[0] = eeData[58] & 0x03FF
+        offsetSP[0] = self.eeData[58] & 0x03FF
         if offsetSP[0] > 511:
             offsetSP[0] -= 1024
 
-        offsetSP[1] = (eeData[58] & 0xFC00) >> 10
+        offsetSP[1] = (self.eeData[58] & 0xFC00) >> 10
         if offsetSP[1] > 31:
             offsetSP[1] -= 64
         offsetSP[1] += offsetSP[0]
 
-        alphaSP[0] = eeData[57] & 0x03FF
+        alphaSP[0] = self.eeData[57] & 0x03FF
         if alphaSP[0] > 511:
             alphaSP[0] -= 1024
         alphaSP[0] /= math.pow(2, alphaScale)
 
-        alphaSP[1] = (eeData[57] & 0xFC00) >> 10
+        alphaSP[1] = (self.eeData[57] & 0xFC00) >> 10
         if alphaSP[1] > 31:
             alphaSP[1] -= 64
         alphaSP[1] = (1 + alphaSP[1] / 128) * alphaSP[0]
 
-        cpKta = eeData[59] & 0x00FF
+        cpKta = self.eeData[59] & 0x00FF
         if cpKta > 127:
             cpKta -= 256
-        ktaScale1 = ((eeData[56] & 0x00F0) >> 4) + 8
+        ktaScale1 = ((self.eeData[56] & 0x00F0) >> 4) + 8
         self.cpKta = cpKta / math.pow(2, ktaScale1)
 
-        cpKv = (eeData[59] & 0xFF00) >> 8
+        cpKv = (self.eeData[59] & 0xFF00) >> 8
         if cpKv > 127:
             cpKv -= 256
-        kvScale = (eeData[56] & 0x0F00) >> 8
+        kvScale = (self.eeData[56] & 0x0F00) >> 8
         self.cpKv = cpKv / math.pow(2, kvScale)
 
         self.cpAlpha[0] = alphaSP[0]
@@ -509,21 +622,20 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
     def _ExtractAlphaParameters(self):
         # extract alpha
-        accRemScale = eeData[32] & 0x000F
-        accColumnScale = (eeData[32] & 0x00F0) >> 4
-        accRowScale = (eeData[32] & 0x0F00) >> 8
-        alphaScale = ((eeData[32] & 0xF000) >> 12) + 30
-        alphaRef = eeData[33]
+        accRemScale = self.eeData[32] & 0x000F
+        accColumnScale = (self.eeData[32] & 0x00F0) >> 4
+        accRowScale = (self.eeData[32] & 0x0F00) >> 8
+        alphaScale = ((self.eeData[32] & 0xF000) >> 12) + 30
+        alphaRef = self.eeData[33]
         accRow = [0] * 24
         accColumn = [0] * 32
-        alphaTemp = [0] * 768
 
         for i in range(6):
             p = i * 4
-            accRow[p + 0] = eeData[34 + i] & 0x000F
-            accRow[p + 1] = (eeData[34 + i] & 0x00F0) >> 4
-            accRow[p + 2] = (eeData[34 + i] & 0x0F00) >> 8
-            accRow[p + 3] = (eeData[34 + i] & 0xF000) >> 12
+            accRow[p + 0] = self.eeData[34 + i] & 0x000F
+            accRow[p + 1] = (self.eeData[34 + i] & 0x00F0) >> 4
+            accRow[p + 2] = (self.eeData[34 + i] & 0x0F00) >> 8
+            accRow[p + 3] = (self.eeData[34 + i] & 0xF000) >> 12
 
         for i in range(24):
             if accRow[i] > 7:
@@ -531,43 +643,41 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
         for i in range(8):
             p = i * 4
-            accColumn[p + 0] = eeData[40 + i] & 0x000F
-            accColumn[p + 1] = (eeData[40 + i] & 0x00F0) >> 4
-            accColumn[p + 2] = (eeData[40 + i] & 0x0F00) >> 8
-            accColumn[p + 3] = (eeData[40 + i] & 0xF000) >> 12
+            accColumn[p + 0] = self.eeData[40 + i] & 0x000F
+            accColumn[p + 1] = (self.eeData[40 + i] & 0x00F0) >> 4
+            accColumn[p + 2] = (self.eeData[40 + i] & 0x0F00) >> 8
+            accColumn[p + 3] = (self.eeData[40 + i] & 0xF000) >> 12
 
         for i in range(32):
             if accColumn[i] > 7:
                 accColumn[i] -= 16
-        for i in range(24):
-            for j in range(32):
+        gc.collect()
+        i = 0
+        while i < 24:
+            j = 0
+            while j < 32:
                 p = 32 * i + j
-                alphaTemp[p] = (eeData[64 + p] & 0x03F0) >> 4
-                if alphaTemp[p] > 31:
-                    alphaTemp[p] -= 64
-                alphaTemp[p] *= 1 << accRemScale
-                alphaTemp[p] += (
+                self.alphaTemp[p] = (self.eeData[64 + p] & 0x03F0) >> 4
+                if self.alphaTemp[p] > 31:
+                    self.alphaTemp[p] -= 64
+                self.alphaTemp[p] *= 1 << accRemScale
+                self.alphaTemp[p] += (
                     alphaRef
                     + (accRow[i] << accRowScale)
                     + (accColumn[j] << accColumnScale)
                 )
-                alphaTemp[p] /= math.pow(2, alphaScale)
-                alphaTemp[p] -= self.tgc * (self.cpAlpha[0] + self.cpAlpha[1]) / 2
-                alphaTemp[p] = SCALEALPHA / alphaTemp[p]
-        # print("alphaTemp: ", alphaTemp)
+                self.alphaTemp[p] = self.alphaTemp[p] / math.pow(2, alphaScale)
+                self.alphaTemp[p] -= self.tgc * (self.cpAlpha[0] + self.cpAlpha[1]) / 2
+                self.alphaTemp[p] = SCALEALPHA / self.alphaTemp[p]
+                gc.collect()
+                j += 1
+            i += 1
 
-        temp = max(alphaTemp)
-        #print("temp", temp)
-
+        temp = max(self.alphaTemp)
         alphaScale = 0
         while temp < 32768:
             temp *= 2
             alphaScale += 1
-
-        for i in range(768):
-            temp = alphaTemp[i] * math.pow(2, alphaScale)
-            self.alpha[i] = int(temp + 0.5)
-
         self.alphaScale = alphaScale
 
     def _ExtractOffsetParameters(self):
@@ -575,19 +685,19 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         occRow = [0] * 24
         occColumn = [0] * 32
 
-        occRemScale = eeData[16] & 0x000F
-        occColumnScale = (eeData[16] & 0x00F0) >> 4
-        occRowScale = (eeData[16] & 0x0F00) >> 8
-        offsetRef = eeData[17]
+        occRemScale = self.eeData[16] & 0x000F
+        occColumnScale = (self.eeData[16] & 0x00F0) >> 4
+        occRowScale = (self.eeData[16] & 0x0F00) >> 8
+        offsetRef = self.eeData[17]
         if offsetRef > 32767:
             offsetRef -= 65536
 
         for i in range(6):
             p = i * 4
-            occRow[p + 0] = eeData[18 + i] & 0x000F
-            occRow[p + 1] = (eeData[18 + i] & 0x00F0) >> 4
-            occRow[p + 2] = (eeData[18 + i] & 0x0F00) >> 8
-            occRow[p + 3] = (eeData[18 + i] & 0xF000) >> 12
+            occRow[p + 0] = self.eeData[18 + i] & 0x000F
+            occRow[p + 1] = (self.eeData[18 + i] & 0x00F0) >> 4
+            occRow[p + 2] = (self.eeData[18 + i] & 0x0F00) >> 8
+            occRow[p + 3] = (self.eeData[18 + i] & 0xF000) >> 12
 
         for i in range(24):
             if occRow[i] > 7:
@@ -595,10 +705,10 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
 
         for i in range(8):
             p = i * 4
-            occColumn[p + 0] = eeData[24 + i] & 0x000F
-            occColumn[p + 1] = (eeData[24 + i] & 0x00F0) >> 4
-            occColumn[p + 2] = (eeData[24 + i] & 0x0F00) >> 8
-            occColumn[p + 3] = (eeData[24 + i] & 0xF000) >> 12
+            occColumn[p + 0] = self.eeData[24 + i] & 0x000F
+            occColumn[p + 1] = (self.eeData[24 + i] & 0x00F0) >> 4
+            occColumn[p + 2] = (self.eeData[24 + i] & 0x0F00) >> 8
+            occColumn[p + 3] = (self.eeData[24 + i] & 0xF000) >> 12
 
         for i in range(32):
             if occColumn[i] > 7:
@@ -607,7 +717,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         for i in range(24):
             for j in range(32):
                 p = 32 * i + j
-                self.offset[p] = (eeData[64 + p] & 0xFC00) >> 10
+                self.offset[p] = (self.eeData[64 + p] & 0xFC00) >> 10
                 if self.offset[p] > 31:
                     self.offset[p] -= 64
                 self.offset[p] *= 1 << occRemScale
@@ -622,39 +732,42 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         KtaRC = [0] * 4
         ktaTemp = [0] * 768
 
-        KtaRoCo = (eeData[54] & 0xFF00) >> 8
+        KtaRoCo = (self.eeData[54] & 0xFF00) >> 8
         if KtaRoCo > 127:
             KtaRoCo -= 256
         KtaRC[0] = KtaRoCo
 
-        KtaReCo = eeData[54] & 0x00FF
+        KtaReCo = self.eeData[54] & 0x00FF
         if KtaReCo > 127:
             KtaReCo -= 256
         KtaRC[2] = KtaReCo
 
-        KtaRoCe = (eeData[55] & 0xFF00) >> 8
+        KtaRoCe = (self.eeData[55] & 0xFF00) >> 8
         if KtaRoCe > 127:
             KtaRoCe -= 256
         KtaRC[1] = KtaRoCe
 
-        KtaReCe = eeData[55] & 0x00FF
+        KtaReCe = self.eeData[55] & 0x00FF
         if KtaReCe > 127:
             KtaReCe -= 256
         KtaRC[3] = KtaReCe
 
-        ktaScale1 = ((eeData[56] & 0x00F0) >> 4) + 8
-        ktaScale2 = eeData[56] & 0x000F
+        ktaScale1 = ((self.eeData[56] & 0x00F0) >> 4) + 8
+        ktaScale2 = self.eeData[56] & 0x000F
 
         for i in range(24):
             for j in range(32):
                 p = 32 * i + j
                 split = 2 * (p // 32 - (p // 64) * 2) + p % 2
-                ktaTemp[p] = (eeData[64 + p] & 0x000E) >> 1
+                ktaTemp[p] = (self.eeData[64 + p] & 0x000E) >> 1
                 if ktaTemp[p] > 3:
                     ktaTemp[p] -= 8
                 ktaTemp[p] *= 1 << ktaScale2
                 ktaTemp[p] += KtaRC[split]
-                ktaTemp[p] /= math.pow(2, ktaScale1)
+                temp = math.pow(2, ktaScale1)
+                ktaTemp[p] = ktaTemp[p] / temp
+                del temp, split
+                gc.collect()
                 # ktaTemp[p] = ktaTemp[p] * mlx90640->offset[p];
 
         temp = abs(ktaTemp[0])
@@ -672,33 +785,34 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                 self.kta[i] = int(temp - 0.5)
             else:
                 self.kta[i] = int(temp + 0.5)
+            gc.collect()
         self.ktaScale = ktaScale1
 
     def _ExtractKvPixelParameters(self):
         KvT = [0] * 4
         kvTemp = [0] * 768
 
-        KvRoCo = (eeData[52] & 0xF000) >> 12
+        KvRoCo = (self.eeData[52] & 0xF000) >> 12
         if KvRoCo > 7:
             KvRoCo -= 16
         KvT[0] = KvRoCo
 
-        KvReCo = (eeData[52] & 0x0F00) >> 8
+        KvReCo = (self.eeData[52] & 0x0F00) >> 8
         if KvReCo > 7:
             KvReCo -= 16
         KvT[2] = KvReCo
 
-        KvRoCe = (eeData[52] & 0x00F0) >> 4
+        KvRoCe = (self.eeData[52] & 0x00F0) >> 4
         if KvRoCe > 7:
             KvRoCe -= 16
         KvT[1] = KvRoCe
 
-        KvReCe = eeData[52] & 0x000F
+        KvReCe = self.eeData[52] & 0x000F
         if KvReCe > 7:
             KvReCe -= 16
         KvT[3] = KvReCe
 
-        kvScale = (eeData[56] & 0x0F00) >> 8
+        kvScale = (self.eeData[56] & 0x0F00) >> 8
 
         for i in range(24):
             for j in range(32):
@@ -706,6 +820,8 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                 split = 2 * (p // 32 - (p // 64) * 2) + p % 2
                 kvTemp[p] = KvT[split]
                 kvTemp[p] /= math.pow(2, kvScale)
+                del split
+                gc.collect()
                 # kvTemp[p] = kvTemp[p] * mlx90640->offset[p];
 
         temp = abs(kvTemp[0])
@@ -728,25 +844,26 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
     def _ExtractCILCParameters(self):
         ilChessC = [0] * 3
 
-        self.calibrationModeEE = (eeData[10] & 0x0800) >> 4
+        self.calibrationModeEE = (self.eeData[10] & 0x0800) >> 4
         self.calibrationModeEE = self.calibrationModeEE ^ 0x80
 
-        ilChessC[0] = eeData[53] & 0x003F
+        ilChessC[0] = self.eeData[53] & 0x003F
         if ilChessC[0] > 31:
             ilChessC[0] -= 64
         ilChessC[0] /= 16.0
 
-        ilChessC[1] = (eeData[53] & 0x07C0) >> 6
+        ilChessC[1] = (self.eeData[53] & 0x07C0) >> 6
         if ilChessC[1] > 15:
             ilChessC[1] -= 32
         ilChessC[1] /= 2.0
 
-        ilChessC[2] = (eeData[53] & 0xF800) >> 11
+        ilChessC[2] = (self.eeData[53] & 0xF800) >> 11
         if ilChessC[2] > 15:
             ilChessC[2] -= 32
         ilChessC[2] /= 8.0
 
         self.ilChessC = ilChessC
+        gc.collect()
 
     def _ExtractDeviatingPixels(self):
         self.brokenPixels = [0xFFFF] * 5
@@ -757,10 +874,10 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         outlierPixCnt = 0
 
         while (pixCnt < 768) and (brokenPixCnt < 5) and (outlierPixCnt < 5):
-            if eeData[pixCnt + 64] == 0:
+            if self.eeData[pixCnt + 64] == 0:
                 self.brokenPixels[brokenPixCnt] = pixCnt
                 brokenPixCnt += 1
-            elif (eeData[pixCnt + 64] & 0x0001) != 0:
+            elif (self.eeData[pixCnt + 64] & 0x0001) != 0:
                 self.outlierPixels[outlierPixCnt] = pixCnt
                 outlierPixCnt += 1
             pixCnt += 1
@@ -774,49 +891,8 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         # print("Found %d broken pixels, %d outliers" % (brokenPixCnt, outlierPixCnt))
         # TODO INCOMPLETE
 
-    def _I2CWriteWord(self, writeAddress, data):
-        cmd = bytearray(4)
-        cmd[0] = writeAddress >> 8
-        cmd[1] = writeAddress & 0x00FF
-        cmd[2] = data >> 8
-        cmd[3] = data & 0x00FF
-        dataCheck = [0]
+    def _I2CReadWords(self, *args, **kwargs):
+        return self.i2c_client._I2CReadWords(*args, **kwargs)
 
-        with self.i2c_device as i2c:
-            i2c.write(cmd)
-        # print("Wrote:", [hex(i) for i in cmd])
-        time.sleep(0.001)
-        self._I2CReadWords(writeAddress, dataCheck)
-        # print("dataCheck: 0x%x" % dataCheck[0])
-        # if (dataCheck != data):
-        #    return -2
-
-    def _I2CReadWords(self, addr, buffer, *, end=None):
-        if end is None:
-            remainingWords = len(buffer)
-        else:
-            remainingWords = end
-        offset = 0
-        addrbuf = bytearray(2)
-        inbuf = bytearray(2 * I2C_READ_LEN)
-
-        with self.i2c_device as i2c:
-            while remainingWords:
-                addrbuf[0] = addr >> 8  # MSB
-                addrbuf[1] = addr & 0xFF  # LSB
-                read_words = min(remainingWords, I2C_READ_LEN)
-                i2c.write_then_readinto(
-                    addrbuf, inbuf, in_end=read_words * 2
-                )  # in bytes
-                # print("-> ", [hex(i) for i in addrbuf])
-                outwords = struct.unpack(
-                    ">" + "H" * read_words, inbuf[0 : read_words * 2]
-                )
-                # print("<- (", read_words, ")", [hex(i) for i in outwords])
-                for i, w in enumerate(outwords):
-                    buffer[offset + i] = w
-                offset += read_words
-                remainingWords -= read_words
-                addr += read_words
-        # print("i2c read", read_words, "words in", time.monotonic()-stamp)
-        # print("Read: ", [hex(i) for i in buffer[0:10]])
+    def _I2CWriteWord(self, *args, **kwargs):
+        return self.i2c_client._I2CWriteWord(*args, **kwargs)
