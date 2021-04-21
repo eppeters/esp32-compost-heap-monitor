@@ -15,6 +15,7 @@ build: clean
 	find . -name '*.py' -print $(PRUNE) | xargs dirname | sort -u | xargs -I {} mkdir -p build/{}
 	eval "set -e; $$(find . -name '*.py' -a \! -name 'main.py' -a \! -name 'boot.py' -print $(PRUNE) | sed "s|\(\./\)\?\(.\+\)\.py|mpy-cross -o build/\2.mpy &|g")"
 	cp main.py boot.py build
+	cp -r certs build
 sync: build
 	ampy -p $(PORT) rmdir . 2>.build.log || true
 	ampy -p $(PORT) put build .

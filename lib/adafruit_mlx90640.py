@@ -240,6 +240,31 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         value |= controlRegister[0] & 0xFC7F
         self._I2CWriteWord(0x800D, value)
 
+    def wait_for_both_subpages(self):
+        """Wait long enough for both subframes to be populated."""
+        wait_time = 0
+        if self.refresh_rate == RefreshRate.REFRESH_0_5_HZ:
+            wait_time = 2
+        if self.refresh_rate == RefreshRate.REFRESH_1_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_2_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_4_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_8_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_16_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_32_HZ:
+            wait_time = wait_time / 2
+        if self.refresh_rate == RefreshRate.REFRESH_64_HZ:
+            wait_time = wait_time / 2
+        # Add a bit of time to be on the safe side
+        wait_time += .01
+        time.sleep(wait_time)
+        del wait_time
+        gc.collect()
+
     def getFrame(self, framebuf):
         """ Request both 'halves' of a frame from the sensor, merge them
         and calculate the temperature in C for each of 32x24 pixels. Placed
@@ -423,6 +448,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
                     * alphaCompensated
                     * (irData + alphaCompensated * taTr)
                 )
+                #print(Sx, self.ksTo[1], alphaCompensated, irData, taTr)
                 Sx = math.sqrt(math.sqrt(Sx)) * self.ksTo[1]
 
                 To = (
