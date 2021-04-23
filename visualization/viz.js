@@ -20,6 +20,7 @@ function main() {
     var svgHeight = 24 * height + axisHeight;
     var graphWidth = svgWidth;
     var graphHeight = svgHeight - axisHeight;
+    var timelineArrowSize = 60;
     var timelinePadding = 40;
     var timelineMinX = timelinePadding;
     var timelineMaxX = svgWidth - timelinePadding;
@@ -73,14 +74,14 @@ function main() {
           var curWidth = this.getBBox().width;
           var leftSidePosition =
             timelinePadding + timelineWidth / 2 - curWidth / 2;
-          var topPosition = 10 + timelinePosition[1] + timelineTicksNode.node().getBBox().height + currentDateVOffset;
+          var topPosition =
+            10 +
+            timelinePosition[1] +
+            timelineTicksNode.node().getBBox().height +
+            currentDateVOffset;
           return `translate(${leftSidePosition}, ${topPosition})`;
         });
     }
-
-    makeFrame(framesScale(initialDate));
-    setTimelineArrow(timeScale(initialDate));
-    updateCurrentDateNode(initialDate);
 
     function makeFrame(temps) {
       var scaleX = d3.scaleOrdinal(_.range(32), _.range(0, graphWidth, width));
@@ -111,22 +112,58 @@ function main() {
         .text((d) => d);
     }
 
-    function setTimelineArrow(location) {
-      var size = 60;
-      var symbol = d3.symbol().size(size).type(d3.symbolTriangle);
-      var symbolNode = timelineNode
-        .append("g")
-        .attr("id", "timelineArrow")
-        .append("path")
-        .attr("d", symbol)
-        .attr("fill", "black");
-      function transform(d) {
-        var transform = `translate(${location},${
-          timelinePosition[1] - size * 0.1
-        }) scale(1,-1)`;
-        return transform;
-      }
-      symbolNode.attr("transform", transform);
+    var timelineArrowSymbol = d3.symbol().size(timelineArrowSize).type(d3.symbolTriangle);
+    var timelineArrowNode = timelineNode
+      .append("g")
+      .attr("id", "timelineArrow");
+    var timelineSymbolNode = timelineArrowNode
+      .append("path")
+      .attr("id", "timelineArrowSymbol")
+      .attr("d", timelineArrowSymbol)
+      .attr("fill", "black");
+
+    function timelineArrowTransform(location) {
+      var transform = `translate(${location},${
+        timelinePosition[1] - timelineArrowSize * 0.1
+      }) scale(1,-1)`;
+      return transform;
     }
+
+    function setTimelineArrow(location) {
+      if (location > timelineMaxX) {
+          location = timelineMaxX;
+      } else if (location < timelineMinX) {
+          location = timelineMinX;
+      }
+      timelineSymbolNode.attr("transform", timelineArrowTransform(location));
+    }
+
+    function initializeTimelineArrow(tickLocation) {
+      var symbolWidth = timelineArrowNode.node().getBBox().width;
+      var symbolHeight = timelineArrowNode.node().getBBox().height;
+      var tickWidth = d3.select("#timelineTicks .tick").node().getBBox().width;
+      var tickCenterPosition = tickLocation + tickWidth / 2;
+      if (tickWidth <= symbolWidth) {
+        var symbolLeftPosition = tickCenterPosition - symbolWidth / 2;
+      } else {
+        var symbolLeftPosition = tickCenterPosition + symbolWidth / 2;
+      }
+      setTimelineArrow(symbolLeftPosition);
+    }
+
+    function initializeTimelineArrowDragging() {
+      var arrow = d3.select("#timelineArrow").call(
+        d3
+          .drag()
+          .on("start", (event, d) => null)
+          .on("drag", (event) => setTimelineArrow(event.x))
+          .on("end", (event, d) => null)
+      );
+    }
+
+    makeFrame(framesScale(initialDate));
+    initializeTimelineArrow(timeScale(initialDate));
+    updateCurrentDateNode(initialDate);
+    initializeTimelineArrowDragging();
   });
 }

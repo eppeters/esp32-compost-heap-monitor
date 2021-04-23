@@ -10,6 +10,7 @@
   "license": "ISC",
   "dependencies": {
     "d3": "^6.7.0",
+    "d3-drag": "^2.0.0",
     "d3-scale-chromatic": "^2.0.0",
     "lodash": "^4.17.21"
   }
