@@ -110,7 +110,6 @@ class I2CClient:
                 remainingWords -= read_words
                 addr += read_words
         #print('at end of readwords for ', addr, len(buffer))
-        #micropython.mem_info(1)
         # print("i2c read", read_words, "words in", time.monotonic()-stamp)
         # print("Read: ", [hex(i) for i in buffer[0:10]])
 
@@ -173,6 +172,7 @@ class RefreshRate:  # pylint: disable=too-few-public-methods
 class MLX90640:  # pylint: disable=too-many-instance-attributes
     """Interface to the MLX90640 temperature sensor."""
 
+    eeData = [0] * 832
     kVdd = 0
     vdd25 = 0
     KvPTAT = 0
@@ -186,7 +186,7 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
     calibrationModeEE = 0
     ksTo = [0] * 5
     ct = [0] * 5
-    alphaTemp = [0.0] * 768
+    alphaTemp = [0] * 768
     alphaScale = 0
     offset = [0] * 768
     kta = [0] * 768
@@ -204,16 +204,18 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
     def _calculate_alpha(self, i):
         #print('calculate alpha for ', i)
         temp = self.alphaTemp[i] * math.pow(2, self.alphaScale)
-        #micropython.mem_info(1)
-        return int(temp + 0.5)
+        temp = int(temp + 0.5)
+        gc.collect()
+        return temp
 
     def __init__(self, i2c_bus, address=0x33):
         i2c_device = I2CDevice(i2c_bus, address)
         self.i2c_client = I2CClient(i2c_device)
-        self.eeData = BufferedI2CList(self.i2c_client, EEDATA_BASE_ADDRESS)
+        self.i2c_client._I2CReadWords(EEDATA_BASE_ADDRESS, self.eeData)
+        #self.eeData = BufferedI2CList(self.i2c_client, EEDATA_BASE_ADDRESS)
         # print(eeData)
         self._ExtractParameters()
-
+        self._subpage_wait_ms = None
         self.alpha = CachedCalculationList(lambda i: self._calculate_alpha(i))
 
     @property
@@ -240,11 +242,13 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         value |= controlRegister[0] & 0xFC7F
         self._I2CWriteWord(0x800D, value)
 
-    def wait_for_both_subpages(self):
-        """Wait long enough for both subframes to be populated."""
+    @property
+    def subpage_wait_ms(self):
+        if self._subpage_wait_ms is not None:
+            return self._subpage_wait_ms
         wait_time = 0
         if self.refresh_rate == RefreshRate.REFRESH_0_5_HZ:
-            wait_time = 2
+            wait_time = 2000
         if self.refresh_rate == RefreshRate.REFRESH_1_HZ:
             wait_time = wait_time / 2
         if self.refresh_rate == RefreshRate.REFRESH_2_HZ:
@@ -259,27 +263,64 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
             wait_time = wait_time / 2
         if self.refresh_rate == RefreshRate.REFRESH_64_HZ:
             wait_time = wait_time / 2
-        # Add a bit of time to be on the safe side
-        wait_time += .01
-        time.sleep(wait_time)
-        del wait_time
+        wait_time += 37
         gc.collect()
+        self._subpage_wait_ms = int(wait_time)
+        return self._subpage_wait_ms
 
-    def getFrame(self, framebuf):
+    def wait_for_subpage_0(self):
+        """Return time, in ms since Epoch, when 0 subpage was last available."""
+        statusRegister = [0]
+        self._I2CWriteWord(0x8000, 0x0030)
+        while True:
+            self._I2CReadWords(0x8000, statusRegister)
+            #print('sreg bit 8: {}, sreg bit 1: {}'.format(statusRegister[0] & 0x0008, statusRegister[0] & 0x0001))
+            if (statusRegister[0] & 0x0008):
+                if (statusRegister[0] & 0x0001) == 0:
+                    # Subpage 0 just became available
+                    return int(time.time_ns() / 1e6)
+                self._I2CWriteWord(0x8000, 0x0030)
+
+    def getFrame(self, framebuf, max_attempts = 5):
         """ Request both 'halves' of a frame from the sensor, merge them
         and calculate the temperature in C for each of 32x24 pixels. Placed
         into the 768-element array passed in! """
         emissivity = 0.95
         tr = 23.15
         mlx90640Frame = [0] * 834
+        frames_read_so_far = [False, False]
+        attempts = 0
 
-        for _ in range(2):
+        start_time = self.wait_for_subpage_0()
+        while attempts < max_attempts:
+            if attempts > 0:
+                elapsed_time = int((time.time_ns() / 1e6) - start_time)
+                wait_til_next_different_frame = self.subpage_wait_ms - (elapsed_time % self.subpage_wait_ms)
+                #print('Waiting {}ms til next different frame'.format(wait_til_next_different_frame))
+                if (elapsed_time // self.subpage_wait_ms) % 2 == 0:
+                    # Will read different frame on next read
+                    time.sleep_ms(int(wait_til_next_different_frame))
+                else:
+                    #print('Same frame coming up, doubling next frame wait')
+                    # Next frame will be the same, wait twice as long
+                    #print('here', wait_til_next_different_frame)
+                    time.sleep_ms(int(wait_til_next_different_frame * 2))
+                del wait_til_next_different_frame, elapsed_time
+                gc.collect()
             status = self._GetFrameData(mlx90640Frame)
+            #print("Frame read: {} attempt {} of {}".format(status, attempts + 1, max_attempts))
+            frames_read_so_far[status] = True
             if status < 0:
                 raise RuntimeError("Frame data error")
             # For a MLX90640 in the open air the shift is -8 degC.
             tr = self._GetTa(mlx90640Frame) - OPENAIR_TA_SHIFT
             self._CalculateTo(mlx90640Frame, emissivity, tr, framebuf)
+            if all(frames_read_so_far):
+                break
+            attempts += 1
+            gc.collect()
+        del mlx90640Frame, tr
+        gc.collect()
 
     def _GetFrameData(self, frameData):
         dataReady = 0
@@ -287,27 +328,31 @@ class MLX90640:  # pylint: disable=too-many-instance-attributes
         statusRegister = [0]
         controlRegister = [0]
 
+        start_time = time.time_ns() / 1e6
         while dataReady == 0:
             self._I2CReadWords(0x8000, statusRegister)
             dataReady = statusRegister[0] & 0x0008
             # print("ready status: 0x%x" % dataReady)
 
         while (dataReady != 0) and (cnt < 5):
+            #jprint("Read frame attempt ", cnt)
             self._I2CWriteWord(0x8000, 0x0030)
-            # print("Read frame", cnt)
             self._I2CReadWords(0x0400, frameData, end=832)
-
             self._I2CReadWords(0x8000, statusRegister)
             dataReady = statusRegister[0] & 0x0008
-            # print("frame ready: 0x%x" % dataReady)
+            #print("frame ready: 0x%x" % dataReady)
             cnt += 1
 
         if cnt > 4:
             raise RuntimeError("Too many retries")
 
+        self._I2CWriteWord(0x8000, 0x0030)
         self._I2CReadWords(0x800D, controlRegister)
         frameData[832] = controlRegister[0]
         frameData[833] = statusRegister[0] & 0x0001
+        #print("Took this many ms to read frame data: ", time.time_ns() / 1e6 - start_time)
+        del dataReady, cnt, statusRegister, controlRegister, start_time
+        gc.collect()
         return frameData[833]
 
     def _GetTa(self, frameData):

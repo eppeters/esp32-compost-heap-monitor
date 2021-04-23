@@ -1,6 +1,7 @@
 from time import sleep, time
 
 import gc
+from array import array
 from machine import deepsleep
 import ntptime
 from ucollections import namedtuple
@@ -42,7 +43,8 @@ THERMOMETER_IDS = ThermometerIds(
 def main():
     """Get sensor data, send it to AWS IoT"""
     vpin = thermal_cam_power_on(I2C_POWER_PIN, warm_up_time_s=START_WAIT_SECS)
-    arr = [0] * 768
+    arr = array('float', (float() for _ in range(768)))
+    gc.collect()
     probe_buffer = [0] * 3
     print("Getting cam data")
     get_thermal_cam_data(arr, vpin, I2C_DATA_PIN, I2C_CLOCK_PIN)

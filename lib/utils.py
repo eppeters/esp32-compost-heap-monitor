@@ -1,3 +1,4 @@
+import micropython
 import time
 
 import gc
@@ -92,9 +93,9 @@ def get_thermal_cam_data(
             I2C(pins=(i2c_clock_pin, i2c_data_pin), frequency=i2c_frequency)
         )
         print("Setting refresh rate")
-        mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_1_HZ
-        print("Waiting for both subpages of data to be available")
-        mlx.wait_for_both_subpages()
+        mlx.refresh_rate = adafruit_mlx90640.RefreshRate.REFRESH_0_5_HZ
+        print("Waiting for frame data after power on")
+        time.sleep_ms(int(mlx.subpage_wait_ms * 2))
         print("Loading frame data into buffer")
         mlx.getFrame(buffer)
         print("Loaded frame data into buffer")
@@ -144,7 +145,9 @@ def get_temp_probe_readings(onewire_pin, power_pin, probe_ids, buffer):
 
 def make_json_message(timestamp, infared_list, probes_dict):
     """Timestamp should be synched with NTP."""
-    infared_list_str = "[{}]".format(",".join((str(i) for i in infared_list)))
+    infared_list_str = str(infared_list)[11:-1]
+    del infared_list
+    gc.collect()
     probes_object_str = "{{ {} }}".format(
         ",".join(['"{}": {}'.format(k, v) for k, v in probes_dict.items()])
     )
