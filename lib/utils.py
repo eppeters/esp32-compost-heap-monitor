@@ -12,15 +12,11 @@ def connect_wifi(
     retry_delay_s=1,
     post_disconnect_wait_s=0.5,
 ):
-    """Connect wifi, deep sleep if problems."""
 
     from network import WLAN, STA_IF, STAT_CONNECTING
 
-    print(ap_name, password)
-
     wlan = WLAN(STA_IF)
     wlan.active(True)
-    print(wlan.scan())
     retries = 0
     start_time = 0
     elapsed_time = 0
@@ -133,6 +129,8 @@ def get_temp_probe_readings(onewire_pin, power_pin, probe_ids, buffer):
         ds.convert_temp()
         time.sleep_ms(750)
         roms = ds.scan()
+        print(roms)
+        buffer_index = 0
         for rom in roms:
             buffer_index = probe_ids.index(int.from_bytes(rom, "big"))
             buffer[buffer_index] = ds.read_temp(rom)

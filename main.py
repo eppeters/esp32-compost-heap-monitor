@@ -23,7 +23,7 @@ AWS_IOT_PORT = 8883
 AWS_IOT_TOPIC = "test-esp32-infared"
 AWS_IOT_CERT_PATH = "certs/iot.crt"
 AWS_IOT_KEY_PATH = "certs/iot.key"
-DEEP_SLEEP_SECS = 2
+DEEP_SLEEP_SECS = 60 * 60 * 4 # Every 4 hours
 I2C_CLOCK_PIN = 22
 I2C_DATA_PIN = 21
 I2C_POWER_PIN = 16
@@ -44,8 +44,8 @@ def main():
     """Get sensor data, send it to AWS IoT"""
     vpin = thermal_cam_power_on(I2C_POWER_PIN, warm_up_time_s=START_WAIT_SECS)
     arr = array('float', (float() for _ in range(768)))
+    probe_buffer = array('float', [float()] * 3)
     gc.collect()
-    probe_buffer = [0] * 3
     print("Getting cam data")
     get_thermal_cam_data(arr, vpin, I2C_DATA_PIN, I2C_CLOCK_PIN)
     del vpin
@@ -86,4 +86,4 @@ if __name__ == "__main__" and RUN_MAIN:
         print("Caught exception {} in main()".format(exc))
         raise exc
     finally:
-        deepsleep(DEEP_SLEEP_SECS)
+        deepsleep(DEEP_SLEEP_SECS * 1000)

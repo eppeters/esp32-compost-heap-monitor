@@ -33,6 +33,7 @@
 		],
 		"files.associations": {
 			".mpyproject.json": "jsonc"
-		}
+		},
+		"idf.portWin": "COM4"
 	}
 }
