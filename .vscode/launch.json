@@ -1,0 +1,12 @@
+{
+    "configurations": [
+    {
+        "type": "firefox",
+        "request": "launch",
+        "reAttach": true,
+        "name": "Launch http",
+        "url": "http://127.0.0.1:8080/viz.html",
+        "webRoot": "${workspaceFolder}/visualization"
+    }
+    ]
+}
