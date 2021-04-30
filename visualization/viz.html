@@ -2,6 +2,16 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@exampledev/new.css@1.1.2/new.min.css"
+    ></link>
+    <style type="text/css">
+        svg {
+            display: block;
+            margin: auto;
+        }
+    </style>
     <script src="node_modules/d3/dist/d3.js"></script>
     <script src="node_modules/d3-scale-chromatic/dist/d3-scale-chromatic.js"></script>
     <script src="node_modules/d3-drag/dist/d3-drag.js"></script>
@@ -10,6 +20,40 @@
   </head>
 
   <body onload="main()">
-    <svg id="infared" /><svg id="probes" />
+    <h1>Compost Heap Temperatures</h1>
+    <p>
+      An ESP32 microcontroller is mounted in my backyard above my compost heap
+      along with a few sensors. This page visualizes the data collected by it.
+      Visualizations include a heatmap of the top of the compost and a
+      timeseries of temperatures at 6 inches, 1 foot, and 2 feet from the ground
+      inside the pile.
+    </p>
+    <h2>Top-of-the-pile heatmap</h2>
+    <figure>
+      <svg id="infared"></svg>
+      <figcaption>
+        A heatmap of the top of the compost, taken by the MLX90640 thermal
+        camera. Drag the triangle left and right to scroll through historic
+        heatmaps, and hover over pixels to see the temperature at that position.
+      </figcaption>
+    </figure>
+    <h2>Internal heap temperatures</h2>
+    <figure>
+      <svg id="probes"></svg>
+      <figcaption>
+        Temperatures at three levels inside the pile.
+        Three temperature probes are mounted on a wooden stick. The nice curve
+        is a bit of a lie since data is logged at most once every four hours.
+      </figcaption>
+    </figure>
+    <h2>How it works</h2>
+    <p>
+      An ESP32 is mounted in my backyard above my compost heap. Every 4 hours it
+      tries to capture a data from an MLX90640 thermal camera and three DS18B20
+      temperature sensors that are mounted at 3 places in the pile (6 inches
+      above ground, 1 foot, and 2 feet). The ESP32 then sends the data to AWS
+      IoT Core, where IoT Analytics process all data for the current month into
+      a CSV that is then visualized below with D3.js.
+    </p>
   </body>
 </html>
