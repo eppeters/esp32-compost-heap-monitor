@@ -49,28 +49,30 @@ function makeInfaredGraph(data) {
   var minDate = _.maxBy(data, (d) => d.date).date;
   var maxDate = _.maxBy(data, (d) => d.date).date;
   var initialDate = maxDate;
-  var svg = d3.select("#infared");
+  var container = d3.select('#infared')
+  var canvas = container.append('canvas').attr('id', 'infaredHeatmap');
+  var context = canvas.node().getContext('2d');
   var width = 8;
   var height = 8;
   var axisHeight = 120;
   var numCols = 32;
   var numRows = 24;
-  var svgWidth = 640;
-  var svgHeight = 480 + axisHeight;
-  var graphWidth = svgWidth;
-  var graphHeight = svgHeight - axisHeight;
+  var canvasWidth = 640;
+  var canvasHeight = 480 + axisHeight;
+  var graphWidth = canvasWidth;
+  var graphHeight = canvasHeight - axisHeight;
   var minTemp = 32;
   var maxTemp = 140;
   var timelineArrowSize = 60;
   var timelinePadding = 40;
   var timelineMinX = timelinePadding;
-  var timelineMaxX = svgWidth - timelinePadding;
+  var timelineMaxX = canvasWidth - timelinePadding;
   var timelineWidth = timelineMaxX - timelineMinX;
   var timelinePosition = [0, 490];
   var updateDebounce = 10;
   var currentDateVOffset = 10;
-  svg.attr("width", svgWidth);
-  svg.attr("height", svgHeight);
+  canvas.attr("width", canvasWidth);
+  canvas.attr("height", canvasHeight);
   var frameScale = d3
     .scaleTime()
     .domain(_.map(data, (d) => d.date))
@@ -90,7 +92,7 @@ function makeInfaredGraph(data) {
   var timelineAxis = d3
     .axisBottom(timeLocScale)
     .tickFormat(d3.timeFormat("%m/%d %H:%M"));
-  var timelineNode = svg.append("g").attr("id", "timeline");
+  var timelineNode = container.append('svg').append("g").attr("id", "timeline");
   var timelineTicksNode = timelineNode
     .append("g")
     .attr("id", "timelineTicks")
@@ -119,7 +121,7 @@ function makeInfaredGraph(data) {
     .attr("transform", "translate(0, 1)");
   timelineFrameTicksNode.select(".domain").attr("visibility", "hidden");
 
-  svg.selectAll("#timelineTicks text").attr("transform", function (d) {
+  container.selectAll("#timelineTicks text").attr("transform", function (d) {
     return (
       "translate(" +
       this.getBBox().height * -2 +
@@ -149,7 +151,8 @@ function makeInfaredGraph(data) {
       });
   }
 
-  var frameNode = svg.append("g").attr("id", "infaredHeatmap");
+  // This is a custom node type for our virtual DOM
+  var frameNode = d3.select(document.createElement('canvasDataContainer'));
 
   var scaleX = d3.scaleOrdinal(
     _.range(graphWidth / width),
@@ -175,6 +178,7 @@ function makeInfaredGraph(data) {
   var tooltip = null;
 
   function makeFrame(temps) {
+    context.clearRect(0, 0, graphWidth, graphHeight);
     temps = resampleTemps(
       temps,
       numCols,
@@ -186,19 +190,25 @@ function makeInfaredGraph(data) {
     var frameUpdate = frameNode.selectAll("rect.pixel").data(temps);
     frameUpdate
       .enter()
-      .append("rect")
+      .append("canvasDataContainer") // custom node
       .attr(
         "id",
         (d, i) =>
           `x${i % (graphWidth / width)}y${Math.floor(i / (graphWidth / width))}`
       )
-      .attr("class", "pixel")
       .attr("x", (d, i) => scaleX(i % (graphWidth / width)))
       .attr("y", (d, i) => scaleY(Math.floor(i / (graphWidth / width))))
       .attr("width", width)
       .attr("height", height)
       .merge(frameUpdate)
-      .attr("fill", (d) => colorScale(scaleFTemp(d)));
+      .attr("fillstyle", (d) => colorScale(scaleFTemp(d)));
+    // Render frameNode elements as canvas
+    frameNode.selectAll('canvasDataContainer').each(function(d, i) {
+      var node = d3.select(this);
+      context.fillStyle = node.attr('fillstyle');
+      context.fillRect(node.attr('x'), node.attr('y'), node.attr('width'), node.attr('height'));
+    });
+/**
     if (tooltip == undefined) {
       tooltip = frameNode
         .append("text")
@@ -222,6 +232,7 @@ function makeInfaredGraph(data) {
           .text(d3.format(".1f")(v) + "\u00B0F");
       }, 10)
     );
+    */
   }
 
   var timelineArrowSymbol = d3
