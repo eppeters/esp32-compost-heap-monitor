@@ -49,18 +49,22 @@ function makeInfaredGraph(data) {
   var minDate = _.maxBy(data, (d) => d.date).date;
   var maxDate = _.maxBy(data, (d) => d.date).date;
   var initialDate = maxDate;
-  var container = d3.select('#infared')
-  var canvas = container.append('canvas').attr('id', 'infaredHeatmap');
-  var context = canvas.node().getContext('2d');
-  var width = 8;
-  var height = 8;
+  var container = d3.select("#infared");
+  var canvas = container.append("canvas").attr("id", "infaredHeatmap");
+  var context = canvas.node().getContext("2d");
+  var width = 4;
+  var height = 4;
   var axisHeight = 120;
   var numCols = 32;
   var numRows = 24;
+  var legendWidth = 100;
+  var legendRectWidth = legendWidth / 4;
+  var legendHeight = 480;
   var canvasWidth = 640;
-  var canvasHeight = 480 + axisHeight;
+  var canvasHeight = 480;
   var graphWidth = canvasWidth;
-  var graphHeight = canvasHeight - axisHeight;
+  var graphHeight = canvasHeight;
+  var heatmapColorInterpolator = d3.interpolateInferno;
   var minTemp = 32;
   var maxTemp = 140;
   var timelineArrowSize = 60;
@@ -68,7 +72,7 @@ function makeInfaredGraph(data) {
   var timelineMinX = timelinePadding;
   var timelineMaxX = canvasWidth - timelinePadding;
   var timelineWidth = timelineMaxX - timelineMinX;
-  var timelinePosition = [0, 490];
+  var timelinePosition = [0, 20];
   var updateDebounce = 10;
   var currentDateVOffset = 10;
   canvas.attr("width", canvasWidth);
@@ -89,10 +93,39 @@ function makeInfaredGraph(data) {
     .scaleOrdinal()
     .domain(_.map(data, (d) => d.date))
     .range(_.map(data, (d) => timeLocScale(d.date)));
+  var colorScale = d3.scaleSequential(heatmapColorInterpolator);
+  var legendTemps = _.range(
+    _.round(minTemp, -1),
+    _.round(maxTemp, -1) + 10,
+    10
+  );
+  var legendScale = d3
+    .scaleSequential(heatmapColorInterpolator)
+    .domain(_.map(legendTemps, scaleFTemp));
+  var legendComponent = d3
+    .legendColor()
+    .shapeWidth(legendRectWidth)
+    .cells(legendTemps.length)
+    .orient("vertical")
+    .labels(_.map(legendTemps, (v) => d3.format(".1f")(v) + "\u00B0F"))
+    .scale(legendScale)
+    .ascending(true);
+  var legendNode = container
+    .append("svg")
+    .attr("id", "heatmapLegend")
+    .attr("width", legendWidth)
+    .attr("height", legendHeight)
+    .append("g");
+  legendNode.call(legendComponent);
   var timelineAxis = d3
     .axisBottom(timeLocScale)
     .tickFormat(d3.timeFormat("%m/%d %H:%M"));
-  var timelineNode = container.append('svg').append("g").attr("id", "timeline");
+  var timelineNode = container
+    .append("svg")
+    .attr("width", graphWidth)
+    .attr("height", axisHeight)
+    .append("g")
+    .attr("id", "timeline");
   var timelineTicksNode = timelineNode
     .append("g")
     .attr("id", "timelineTicks")
@@ -152,8 +185,6 @@ function makeInfaredGraph(data) {
   }
 
   // This is a custom node type for our virtual DOM
-  var frameNode = d3.select(document.createElement('canvasDataContainer'));
-
   var scaleX = d3.scaleOrdinal(
     _.range(graphWidth / width),
     _.range(0, graphWidth, width)
@@ -162,7 +193,6 @@ function makeInfaredGraph(data) {
     _.range(graphHeight / height),
     _.rangeRight(0, graphHeight, height)
   );
-  var colorScale = d3.scaleSequential(d3.interpolateInferno);
 
   function scaleFTemp(temp) {
     temp += 5;
@@ -178,8 +208,7 @@ function makeInfaredGraph(data) {
   var tooltip = null;
 
   function makeFrame(temps) {
-    context.clearRect(0, 0, graphWidth, graphHeight);
-    temps = resampleTemps(
+    var temps = resampleTemps(
       temps,
       numCols,
       numRows,
@@ -187,28 +216,17 @@ function makeInfaredGraph(data) {
       graphHeight / height
     );
     temps = _.flatten(temps);
-    var frameUpdate = frameNode.selectAll("rect.pixel").data(temps);
-    frameUpdate
-      .enter()
-      .append("canvasDataContainer") // custom node
-      .attr(
-        "id",
-        (d, i) =>
-          `x${i % (graphWidth / width)}y${Math.floor(i / (graphWidth / width))}`
-      )
-      .attr("x", (d, i) => scaleX(i % (graphWidth / width)))
-      .attr("y", (d, i) => scaleY(Math.floor(i / (graphWidth / width))))
-      .attr("width", width)
-      .attr("height", height)
-      .merge(frameUpdate)
-      .attr("fillstyle", (d) => colorScale(scaleFTemp(d)));
     // Render frameNode elements as canvas
-    frameNode.selectAll('canvasDataContainer').each(function(d, i) {
-      var node = d3.select(this);
-      context.fillStyle = node.attr('fillstyle');
-      context.fillRect(node.attr('x'), node.attr('y'), node.attr('width'), node.attr('height'));
+    _.forEach(temps, function (v, i) {
+      context.fillStyle = colorScale(scaleFTemp(v));
+      context.fillRect(
+        scaleX(i % (graphWidth / width)),
+        scaleY(Math.floor(i / (graphWidth / width))),
+        width,
+        height
+      );
     });
-/**
+    /**
     if (tooltip == undefined) {
       tooltip = frameNode
         .append("text")
@@ -263,7 +281,8 @@ function makeInfaredGraph(data) {
   }
 
   function getClosestMatchingDate(date) {
-    return _.findLast(data, (d) => d.date <= date).date || _.last(data).date;
+    const earliestMatch = _.findLast(data, (d) => d.date <= date);
+    return earliestMatch ? earliestMatch.date : _.first(data).date;
   }
 
   function updateFrame(date) {
@@ -295,12 +314,17 @@ function makeInfaredGraph(data) {
 
 function makeProbeGraph(data) {
   var svg = d3.select("#probes");
+  var lineColors = ["blue", "yellow", "red"]; // top, middle, bottom
+  var legendLabels = ["2' (60cm)", "1' (30cm)", '6" (15cm)'] // top, middle, bottom
   var axisHeight = 120;
   var numCols = 32;
   var numRows = 24;
-  var svgWidth = 640;
+  var legendWidth = 120;
+  var legendLeftPadding = 10;
+  var legendLeftPosition = 640 + legendLeftPadding;
+  var svgWidth = 640 + legendWidth + legendLeftPadding;
   var svgHeight = 480 + axisHeight;
-  var graphWidth = svgWidth;
+  var graphWidth = svgWidth - legendWidth - legendLeftPadding;
   var graphHeight = svgHeight - axisHeight;
   svg.attr("width", svgWidth);
   svg.attr("height", svgHeight);
@@ -344,9 +368,27 @@ function makeProbeGraph(data) {
     .tickFormat(d3.timeFormat("%m/%d %H:%M"));
   var tempAxis = d3
     .axisLeft(scaleY)
-    .tickFormat(d => d3.format(",d")(d) + "\u00B0F");
-  var probeTempsAxisNode = svg.append('g').attr('id', 'probeTempsAxis')
-  probeTempsAxisNode.append('g').attr('id', 'probeTempsAxisTicks').attr("transform", `translate(40, 10)`).call(tempAxis);
+    .tickFormat((d) => d3.format(",d")(d) + "\u00B0F");
+  var probeTempsAxisNode = svg.append("g").attr("id", "probeTempsAxis");
+  probeTempsAxisNode
+    .append("g")
+    .attr("id", "probeTempsAxisTicks")
+    .attr("transform", `translate(40, 10)`)
+    .call(tempAxis);
+  var legendNode = svg
+    .append("g")
+    .attr("id", "probeLegend")
+    .attr(
+      "transform",
+      `translate(${legendLeftPosition + legendLeftPadding}, 0)`
+    );
+  var legendComponent = d3
+    .legendColor()
+    .shape("path", d3.symbol().type(d3.symbolSquare).size(20))
+    .scale(
+      d3.scaleOrdinal().domain(legendLabels).range(lineColors)
+    );
+  legendNode.call(legendComponent)
   var timelineNode = svg.append("g").attr("id", "probeTimeline");
   var timelineTicksNode = timelineNode
     .append("g")
@@ -365,23 +407,20 @@ function makeProbeGraph(data) {
       ")rotate(-45)"
     );
   });
-  tempLine(topTemps, "blue");
-  tempLine(middleTemps, "yellow");
-  tempLine(bottomTemps, "red");
+  tempLine(topTemps, lineColors[0]);
+  tempLine(middleTemps, lineColors[1]);
+  tempLine(bottomTemps, lineColors[2]);
 }
 
 function main() {
   function parseData(data) {
     function cToF(t) {
-      return (9/5) * t + 32
+      return (9 / 5) * t + 32;
     }
     return _.map(data, function (d) {
       return {
         date: new Date(_.toNumber(d["message_timestamp"]) * 1000),
-        infared_temps: _.map(
-          JSON.parse(d["infared_temps"]),
-          cToF
-        ),
+        infared_temps: _.map(JSON.parse(d["infared_temps"]), cToF),
         probe_temp_top: cToF(_.toNumber(d["probe_temp_top"])),
         probe_temp_middle: cToF(_.toNumber(d["probe_temp_middle"])),
         probe_temp_bottom: cToF(_.toNumber(d["probe_temp_bottom"])),
