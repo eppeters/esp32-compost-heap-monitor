@@ -164,7 +164,7 @@ function makeInfaredGraph(data) {
   function scaleFTemp(temp) {
     temp += 5;
     var numerator =
-      Math.pow(temp + 74, 5) + Math.pow(temp, 5) - Math.pow(temp, 3);
+      Math.pow(temp + 80, 5) + Math.pow(temp, 5) - Math.pow(temp, 3);
     var denominator = Math.pow(maxTemp + 47, 5);
     var scaledTemp = numerator / denominator;
     var scaledTemp = scaledTemp < 0 ? 0.05 : scaledTemp;
@@ -299,7 +299,7 @@ function makeProbeGraph(data) {
   var minDate = _.minBy(data, (d) => d.date).date;
   var maxDate = _.maxBy(data, (d) => d.date).date;
   var minTemp = 0;
-  var maxTemp = 140;
+  var maxTemp = 180;
   var timelinePadding = 40;
   var timelineMinX = timelinePadding;
   var timelineMaxX = svgWidth - timelinePadding;
